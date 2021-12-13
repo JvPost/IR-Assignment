@@ -9,6 +9,7 @@ qrels_path = config["qrels_path"]
 device = torch.device('cpu')
 
 
-labels = query_labels_from_file(qrels_path, 'results.txt')
-for l in labels:
-    print(l)
+
+topics = get_topics(topics_path)
+for topic in list(topics.values())[0:10]:
+    print(expand_query(topic, wiki_300))

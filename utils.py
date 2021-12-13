@@ -1,6 +1,37 @@
 import codecs
 from bs4 import BeautifulSoup
 import numpy as np
+import json
+from pyserini.index import IndexReader 
+from pyserini.search import SimpleSearcher
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+from nltk.tokenize import word_tokenize
+
+class Singleton(type):
+    _instances = {}
+    def __call__(cls, *args, **kwargs):
+        if cls not in cls._instances:
+            cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
+        return cls._instances[cls]
+
+class Searcher(metaclass=Singleton):
+    config = json.loads(open("config.json", "r").read())
+    searcher = SimpleSearcher(config['index_path'])
+    searcher.set_bm25(0.9, 0.4)
+    
+    @staticmethod
+    def search(query: str, k: int) -> list:
+        return Searcher.searcher.search(query, k);
+    
+class IndexReader(metaclass=Singleton):
+    config = json.loads(open("config.json", "r").read())
+    reader = IndexReader(config['index_path'])
+    
+    @staticmethod
+    def analyze(query):
+        return IndexReader.reader.analyze(query)
 
 def get_similar_words(word : str, model, n : int = 10) -> list:
     if model.has_index_for(word):
@@ -8,16 +39,46 @@ def get_similar_words(word : str, model, n : int = 10) -> list:
     else:
         return []
     
-def expand_query(query, model, n = 10 ) -> str:
-    query = query.lower().split()
-    extra_words = []
-    for q in query:
-        extra_words += get_similar_words(q, model, n)
-    extra_words = np.array(extra_words)
+def get_similar_words_from_sentence(sentence: str, model, n: int):
+    sentence = sentence.split()
+    extra_words_and_weights = []
+    for s in sentence:
+        extra_words_and_weights += get_similar_words(s, model, n)
+    extra_words = np.array(extra_words_and_weights)
     if np.size(extra_words)>0:
-        flipped = 1 - extra_words[:,1].astype(np.float64) # flip to make the argsort descending
+        flipped = 1-extra_words[:,1].astype(np.float64)
         extra_words = extra_words[np.argsort(flipped)][:n,0]
-    return ' '.join(query + list(extra_words))
+    return extra_words
+
+def expand_query(topic, model, n = 10 ) -> str:
+    ps = PorterStemmer()
+    topic = word_tokenize(topic)
+    clean_topic = []
+    for word in topic:
+        if word not in stopwords.words('english'):
+            clean_topic.append(word.lower())
+    stemmed_query = [ps.stem(w) for w in clean_topic]
+    
+    final_extra_words = []
+    similar_words = []
+    itr = 0
+    idx = 0
+    while(len(final_extra_words) < n):
+        if idx >= len(similar_words):
+            itr+=1
+            similar_words = get_similar_words_from_sentence(' '.join(clean_topic), model, itr*n)
+        
+        if len(similar_words) > 0:
+            word = similar_words[idx]
+            if ps.stem(word) not in stemmed_query:
+                final_extra_words.append(word)
+                stemmed_query += ps.stem(word)
+            if itr == n:
+                break
+            idx+=1
+        else:
+            break
+    return ' '.join(topic + final_extra_words)
     
 def parse_topic(topic_tag : str) -> dict:
     key = topic_tag.find('num').get_text().split()[1]
@@ -26,7 +87,7 @@ def parse_topic(topic_tag : str) -> dict:
 
 def get_topics(path : str) -> dict:
     topics_file = codecs.open(path, 'r', 'utf-8').read()
-    soup = BeautifulSoup(topics_file)
+    soup = BeautifulSoup(topics_file, features='html.parser')
     topics = {}
     for t in soup.findAll('top'):
         kvp = parse_topic(t)
@@ -86,4 +147,16 @@ def NDCG(query_relevancy_labels, k):
     idcg = DCG(np.sort(y)[::-1], k)
     return 0 if idcg == 0 else (DCG(y, k) / idcg)
 
+def precision(query_relevancy_labels, k):
+    y = query_relevancy_labels
+    return np.sum(y[:k])/k
 
+def MAP(query_relevancy_labels):
+    y = query_relevancy_labels
+    numerator = np.sum([y[k-1]*precision(y, k) for k in range(1, len(y)+1)])
+    denomenator = 1 if np.sum(y) == 0 else np.sum(y)
+    if denomenator == 0:
+        result = 0
+    else:
+        result = numerator/denomenator
+    return result
