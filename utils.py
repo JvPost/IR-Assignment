@@ -41,9 +41,7 @@ def get_similar_words(word : str, model, n : int = 10) -> list:
     
 def get_similar_words_from_sentence(sentence: str, model, n: int):
     sentence = sentence.split()
-    extra_words_and_weights = []
-    for s in sentence:
-        extra_words_and_weights += get_similar_words(s, model, n)
+    extra_words_and_weights = model.most_similar(positive = sentence, topn=n)
     extra_words = np.array(extra_words_and_weights)
     if np.size(extra_words)>0:
         flipped = 1-extra_words[:,1].astype(np.float64)
