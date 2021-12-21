@@ -25,6 +25,8 @@ class Searcher(metaclass=Singleton):
     def search(query: str, k: int) -> list:
         return Searcher.searcher.search(query, k);
     
+    
+    
 class IndexReader(metaclass=Singleton):
     config = json.loads(open("config.json", "r").read())
     reader = IndexReader(config['index_path'])
@@ -32,6 +34,8 @@ class IndexReader(metaclass=Singleton):
     @staticmethod
     def analyze(query):
         return IndexReader.reader.analyze(query)
+    
+    
 
 def get_similar_words(word : str, model, n : int = 10) -> list:
     if model.has_index_for(word):
@@ -39,16 +43,19 @@ def get_similar_words(word : str, model, n : int = 10) -> list:
     else:
         return []
     
-def get_similar_words_from_sentence(sentence: str, model, n: int):
+def get_similar_words_from_sentence(sentence: str, model, n: int, threshold=0):
     sentence = sentence.split()
-    extra_words_and_weights = model.most_similar(positive = sentence, topn=n)
+    extra_words_and_weights = list()
+    for s in sentence:
+        extra_words_and_weights+= get_similar_words(s, model, n)   
     extra_words = np.array(extra_words_and_weights)
     if np.size(extra_words)>0:
         flipped = 1-extra_words[:,1].astype(np.float64)
-        extra_words = extra_words[np.argsort(flipped)][:n,0]
+        extra_words = extra_words[np.argsort(flipped)][:n]
+        extra_words = extra_words[extra_words[:, 1].astype(np.float64) >= threshold][:n,0]
     return extra_words
 
-def expand_query(topic, model, n = 10 ) -> str:
+def expand_query(topic, model, n = 10, threshold=0 ) -> str:
     ps = PorterStemmer()
     topic = word_tokenize(topic)
     clean_topic = []
@@ -117,8 +124,14 @@ def query_labels_from_file(qrels_path, results_path):
             
     with open(results_path, 'r') as results_file:
         current_query, document, rank, _, _ = parse_results_line(next(results_file))
-        label = relevancies[current_query][document]
-        rank_label_list = [(rank, label)]
+        
+        rank_label_list = []
+        if current_query in relevancies:
+            if document in relevancies[current_query]:
+                label = relevancies[current_query][document]
+                rank_label_list = [(rank, label)]
+        
+        
         for line in results_file:
             query, document, rank, _, _ = parse_results_line(line)
             if query != current_query:
@@ -158,3 +171,55 @@ def MAP(query_relevancy_labels):
     else:
         result = numerator/denomenator
     return result
+
+
+
+###
+#    Relevance feedback
+###
+
+def merge_doc_vectors(docs):
+    tfs = dict()
+    for d in docs:
+        tf = IndexReader.reader.get_document_vector(d)
+        for k in tf:
+            if k in tfs:
+                tfs[k] += tf[k]
+            else:
+                tfs[k] = tf[k]
+    return tfs
+
+def rank_words(doc_vectors, words):
+    top_words = {}
+    for w in words:
+        if w in doc_vectors:
+            if w in top_words:
+                top_words[w] += doc_vectors[w]
+            else:
+                top_words[w] = doc_vectors[w]
+    ordered_dict = dict(sorted(top_words.items(), key=lambda item: item[1], reverse=True))
+    return list(ordered_dict.keys())
+
+    
+def expand_query_using_relevance_feedback(model, topic, n = None, top_docs = 10):
+    if n is None:
+        n = 0
+        for word in topic.split():
+            if word not in stopwords.words('english'):
+                n += 1
+        
+    hits = Searcher.search(topic, top_docs)
+    doc_ids = [h.docid for h in hits]
+    doc_vector = merge_doc_vectors(doc_ids)
+    top_words = []
+    itr = 1
+    while len(top_words) <= n:
+        prev_len = len(top_words)
+        new_words = expand_query(topic, model, 10*n*itr).split()[n:]
+        potentials = rank_words(doc_vector, new_words)
+        top_words += potentials[(itr-1)*n:itr*n]
+        itr+=1
+        if prev_len == len(top_words) or itr >= 10:
+            break
+        
+    return topic + ' '.join(top_words[:n])
