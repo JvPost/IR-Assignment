@@ -3,11 +3,14 @@ from bs4 import BeautifulSoup
 import numpy as np
 import json
 from pyserini.index import IndexReader 
-from pyserini.search import SimpleSearcher
+from pyserini.search import SimpleSearcher, querybuilder
 import nltk
 from nltk.corpus import stopwords
 from nltk.stem import PorterStemmer
 from nltk.tokenize import word_tokenize
+import re
+
+regex = re.compile('[^a-zA-Z]')
 
 class Singleton(type):
     _instances = {}
@@ -25,7 +28,22 @@ class Searcher(metaclass=Singleton):
     def search(query: str, k: int) -> list:
         return Searcher.searcher.search(query, k);
     
-    
+    @staticmethod
+    def weighted_search(query, k, n, weights: tuple):
+        query_arr = query.split()
+        should = querybuilder.JBooleanClauseOccur['should'].value
+        boolean_query_builder = querybuilder.get_boolean_query_builder()
+        for i, word in enumerate(query_arr):
+            if word not in stopwords.words('english'):
+                term = querybuilder.get_term_query(word.lower())
+                if i < n:
+                    boost = querybuilder.get_boost_query(term, weights[0])
+                else:
+                    boost = querybuilder.get_boost_query(term, weights[1])
+                boolean_query_builder.add(boost, should)
+        boosted_query = boolean_query_builder.build()
+        return Searcher.search(boosted_query, k)
+
     
 class IndexReader(metaclass=Singleton):
     config = json.loads(open("config.json", "r").read())
@@ -83,11 +101,17 @@ def expand_query(topic, model, n = 10, threshold=0 ) -> str:
             idx+=1
         else:
             break
-    return ' '.join(topic + final_extra_words)
+    result_arr = topic + final_extra_words
+    result = ' '.join([regex.sub('', word) for word in result_arr])
+    return result
     
 def parse_topic(topic_tag : str) -> dict:
     key = topic_tag.find('num').get_text().split()[1]
-    value = ' '.join(topic_tag.find('title').get_text().split('\n')[0].split())
+    value = ""
+    for s in topic_tag.find('title').get_text().splitlines():
+        if s != "":
+            value = s
+            break
     return (key, value)
 
 def get_topics(path : str) -> dict:
@@ -140,7 +164,8 @@ def query_labels_from_file(qrels_path, results_path):
                 current_query = query
                 rank_label_list = []
             # TODO: experimental
-            relevancy = relevancies[query]
+            if query in relevancies:
+                relevancy = relevancies[query]
             label = relevancy[document] if document in relevancy else 0
             # TODO: End experimental
             rank_label_list.append((rank, label))
@@ -172,6 +197,11 @@ def MAP(query_relevancy_labels):
         result = numerator/denomenator
     return result
 
+def recall(query_relevancy_labels, k):
+    y = query_relevancy_labels
+    rel = np.sum(y[:k])
+    total = np.sum(y)
+    return 0 if total == 0 else rel / total
 
 
 ###
@@ -222,4 +252,4 @@ def expand_query_using_relevance_feedback(model, topic, n = None, top_docs = 10)
         if prev_len == len(top_words) or itr >= 10:
             break
         
-    return topic + ' '.join(top_words[:n])
+    return topic + ' ' + ' '.join(top_words[:n])
